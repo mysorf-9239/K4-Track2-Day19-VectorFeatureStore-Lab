@@ -95,6 +95,13 @@ if res.stderr:
     print(res.stderr)
 assert res.returncode == 0, f"feast apply failed: {res.stderr}"
 
+# %%
+# check lại registry, phải thấy đủ 3 feature views
+res = subprocess.run(["feast", "feature-views", "list"], cwd=str(FEAST_DIR),
+                     capture_output=True, text=True, check=False)
+print(res.stdout)
+assert res.returncode == 0, res.stderr
+
 # %% [markdown]
 # ## 3. `feast materialize-incremental` — load offline → online
 #
@@ -147,7 +154,7 @@ print(f"Single lookup: {single_latency_ms:.2f}ms")
 print({k: v[0] for k, v in features.items()})
 
 # %% [markdown]
-# ## 5. TODO — Batch latency benchmark (100 lookups, P99)
+# ## 5. Batch latency benchmark (100 lookups, P99)
 
 # %%
 latencies: list[float] = []
@@ -183,19 +190,31 @@ else:
 
 # %%
 import pandas as pd
+
+PIT_FEATURES = [
+    "user_profile_features:reading_speed_wpm",
+    "user_profile_features:topic_affinity",
+]
+
+# profile u_001 ghi lúc NOW-1h, u_002 lúc NOW-2h, u_003 lúc NOW-3h
+# nên event của mỗi user phải nằm sau thời điểm đó mới join ra được giá trị
 entity_df = pd.DataFrame({
     "user_id": ["u_001", "u_002", "u_003"],
-    "event_timestamp": [NOW - timedelta(hours=2), NOW - timedelta(hours=1), NOW],
+    "event_timestamp": [NOW - timedelta(minutes=30), NOW - timedelta(hours=1), NOW],
 })
 
-historical = fs.get_historical_features(
-    entity_df=entity_df,
-    features=[
-        "user_profile_features:reading_speed_wpm",
-        "user_profile_features:topic_affinity",
-    ],
-).to_df()
-print(historical)
+historical = fs.get_historical_features(entity_df=entity_df, features=PIT_FEATURES).to_df()
+print(historical.sort_values("user_id").to_string(index=False))
+print(f"\n{len(historical)} rows x {len(PIT_FEATURES)} features")
+
+# %%
+# Thử hỏi u_001 tại NOW-2h, lúc đó profile chưa tồn tại (ghi lúc NOW-1h).
+# PIT join đúng thì không được lấy giá trị "tương lai" về, row phải rỗng.
+early = pd.DataFrame({"user_id": ["u_001"], "event_timestamp": [NOW - timedelta(hours=2)]})
+leak_check = fs.get_historical_features(entity_df=early, features=PIT_FEATURES).to_df()
+print(leak_check.to_string(index=False) if len(leak_check) else "(không có row nào)")
+has_value = len(leak_check) > 0 and leak_check["reading_speed_wpm"].notna().any()
+print("LEAK!" if has_value else "OK, không lấy dữ liệu tương lai")
 
 # %% [markdown]
 # ## Deliverable evidence
